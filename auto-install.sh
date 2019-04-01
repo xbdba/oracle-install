@@ -2,7 +2,7 @@
 #   System Required:  Redhat 6,7                                  #
 #   Description: One click Install Oracle DB 11g|18c              #
 #   Author: Xiong Bin                                             #
-#   If any question contact email:xiongbin@tfzq.com               #
+#   If any question contact email:xbdba@qq.com               #
 #=================================================================#
 
 ## list rpm to install
@@ -116,8 +116,8 @@ PROFILE="/etc/profile"
 BASH_PROFILE="/home/oracle/.bash_profile"
 
 ## Test and Real environment yum repo server,inclue install software
-testip="192.168.146.104"
-realip="172.19.16.205"
+testip="127.0.0.1"
+realip="127.0.0.1"
 
 softdir="/home/soft"
 
