@@ -1,8 +1,9 @@
+#!/bin/bash
 #=================================================================#
 #   System Required:  Redhat 6,7                                  #
 #   Description: One click Install Oracle DB 11g|18c              #
 #   Author: Xiong Bin                                             #
-#   If any question contact email:xbdba@qq.com               #
+#   If any question contact email: xbdba@qq.com                   #
 #=================================================================#
 
 ## list rpm to install
@@ -27,7 +28,6 @@ sysstat-*
 rpm7_11g=(
 binutils-2*
 compat-libcap1-1.10*
-compat-libstdc++-33*
 gcc-4*
 gcc-c++-4*
 glibc-2*
@@ -179,11 +179,13 @@ config_yum()
         exit 1
     fi
 
+    local version="$(getversion)"
+
     if redhatversion 6; then
         cat <<EOF > /etc/yum.repos.d/dvd.repo 
 [redhat]
 name=redhat
-baseurl=$url/redhat/6/
+baseurl=$url/redhat/$version/
 enable=1
 gpgcheck=0
 
@@ -197,7 +199,7 @@ EOF
         cat <<EOF > /etc/yum.repos.d/dvd.repo 
 [redhat]
 name=redhat
-baseurl=$url/redhat/7/
+baseurl=$url/redhat/$version/
 enable=1
 gpgcheck=0
 
@@ -209,6 +211,16 @@ gpgcheck=0
 EOF
     fi
 
+redhat_code=`cat /etc/yum.repos.d/dvd.repo|grep baseurl|grep redhat|awk -F '=' '{print $2}'|xargs curl -s -o /dev/null -w "%{http_code}"`
+epel_code=`cat /etc/yum.repos.d/dvd.repo|grep baseurl|grep epel|awk -F '=' '{print $2}'|xargs curl -s -o /dev/null -w "%{http_code}"`
+if [[ $epel_code == '404' ]]; then
+    echo -e "${red}Error: epel yum url network error,Please check file \"/etc/yum.repos.d/dvd.repo\" first!!! ${plain}"
+    exit 1 
+fi
+if [[ $redhat_code == '404' ]]; then
+    echo -e "${red}Error: redhat yum url network error,Please check file \"/etc/yum.repos.d/dvd.repo\" first!!! ${plain}"
+    exit 1 
+fi
 }
 
 check_rpm()
@@ -252,12 +264,7 @@ check_rpm()
             echo -e "${red}${error[$ii]}^${plain}"
             yum install -y ${error[$ii]}
         done
-        echo
-        echo "======================================="
-        echo -e "${red}Yum install completed,please restart install operation!${plain} "
-        echo "======================================="
-        echo
-        exit 1
+        check_rpm
     else
         echo
         echo "======================================="
@@ -292,18 +299,10 @@ Press_Start()
 init_para()
 {  
     #Define oracle password
-    echo -e "${yellow}Please input oracle's user password: ${plain}"
-    read -p "(Default password: oracle):" oraclepw
-    if [ -z $oraclepw ];then
-        oraclepw=oracle
-    fi
+    oraclepw=oracle
     
     #define oracle install directory
-    echo -e "${yellow}Please input oracle install PATH: ${plain}"
-    read -p "(Default path: /u01/app/oracle):" oraclepath
-    if [ -z $oraclepath ];then
-        oraclepath=/u01/app/oracle
-    fi
+    oraclepath=/u01/app/oracle
     
     #define oracle version
     echo -e "${yellow}Please input oracle version to install [${red}11g${plain} or ${red}18c${plain}]: ${plain}"
@@ -500,7 +499,7 @@ export ORACLE_HOME=\$ORACLE_BASE/product/${dbhome_str}/dbhome_1
 export ORACLE_SID=$2
 export ORACLE_TERM=xterm
 export NLS_DATA_FORMAT="DD-MON-YYYY HH24:MI:SS"
-export NLS_LANG="SIMPLIFIED CHINESE_CHINA.ZHS16GBK"
+export NLS_LANG="AMERICAN_AMERICA.UTF8"
 export TNS_ADMIN=\$ORACLE_HOME/network/admin
 export ORA_NLS11=\$ORACLE_HOME/nls/data
 export PATH=.:\${JAVA_HOME}/bin:\${PATH}:$HOME/bin:\$ORACLE_HOME/bin:\$ORACLE_HOME/OPatch
@@ -515,6 +514,7 @@ export CLASSPATH=\${CLASSPATH}:\$ORACLE_HOME/network/jlib
 export THREADS_FLAG=native
 export TEMP=/tmp
 export TMPDIR=/tmp
+export LANG=en_US.UTF-8
 umask 022
 EOF
 }
@@ -595,6 +595,7 @@ alter system set dispatchers='' scope=spfile sid='*';
 alter system set audit_trail=none scope=spfile sid='*';
 alter system set processes=1000 scope=spfile;
 alter profile default limit PASSWORD_LIFE_TIME UNLIMITED;
+alter system set db_create_file_dest='/u01/app/oracle/oradata';
 exec DBMS_AUTO_TASK_ADMIN.DISABLE(client_name => 'auto space advisor',operation => NULL,window_name => NULL);
 exec DBMS_AUTO_TASK_ADMIN.DISABLE(client_name => 'sql tuning advisor',operation => NULL,window_name => NULL);
 shutdown immediate;
@@ -617,8 +618,7 @@ fi
 
 patch()
 {
-    export path=$1
-    export homepath=$1/product/${dbhome_str}/dbhome_1
+    homepath=$oraclepath/product/${dbhome_str}/dbhome_1
     cd $homepath
     if [ -d OPatch.bkp ];then
         rm -rf OPatch.bkp
@@ -628,21 +628,6 @@ patch()
     fi
     cp -r ${softdir}/OPatch . && chown -R oracle:dba OPatch
 
-sed -i '/set linesize 300/,+10d' sqlplus/admin/glogin.sql
-
-cat <<EOF >> sqlplus/admin/glogin.sql
-set linesize 300
-set pagesize 999
-define _editor='vi'
-set termout off
-def _i_user="&_user"
-def _i_conn="&_connect_identifier"
-col _i_user noprint new_value _i_user
-col _i_conn noprint new_value _i_conn
-select lower('&_user') "_i_user",upper('&_connect_identifier') "_i_conn" from dual;
-set termout on
-set sqlprompt "&_i_user@&_i_conn> "
-EOF
     cd $softdir
     if [ ! -f "file.rsp" ];then
         wget $url/soft/file.rsp
@@ -655,24 +640,35 @@ EOF
     su - oracle -c "cd ${softdir}/2*;source /home/oracle/.bash_profile;opatch apply -silent -ocmrf ${softdir}/file.rsp"
 }
 
+glogin()
+{
+    cd $oraclepath/product/${dbhome_str}/dbhome_1
+    sed -i '/set linesize 300/,+10d' sqlplus/admin/glogin.sql
+    cat <<EOF >> sqlplus/admin/glogin.sql
+set linesize 300
+set pagesize 999
+define _editor='vi'
+set termout off
+def _i_user="&_user"
+def _i_conn="&_connect_identifier"
+col _i_user noprint new_value _i_user
+col _i_conn noprint new_value _i_conn
+select lower('&_user') "_i_user",upper('&_connect_identifier') "_i_conn" from dual;
+set termout on
+set sqlprompt "&_i_user@&_i_conn> "
+EOF
+}
+
 rlwrap()
 {
-    cd $softdir
-    if [ ! -f "rlwrap-0.42.tar.gz" ];then
-        wget $url/soft/rlwrap-0.42.tar.gz
-    fi
-    tar -zxvf rlwrap-0.42.tar.gz
-    cd rlwrap*
     echo
     echo "======================================="
     echo -e "${yellow}Now installing rlwrap,please wait...${plain}"
     echo "======================================="
     echo
-    yum install readline* libtermcap-devel* -y
-    ./configure
-    make && make install
+    yum install rlwrap -y
     if [[ `grep "alias sqlplus" $BASH_PROFILE` = "" ]];then
-cat <<EOF >> /home/oracle/.bash_profile
+        cat <<EOF >> /home/oracle/.bash_profile
 alias sqlplus='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/sqlplus'
 alias rman='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/rman'
 alias asmcmd='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/asmcmd'
@@ -695,8 +691,8 @@ pre-install()
     config_yum
     disable_selinux
     init_para
-    check_rpm
     Press_Start
+    check_rpm
     adduser $oraclepw
     kernel $oraclepath $orasid
     mkdir -p $oraclepath && chown -R oracle:oinstall $oraclepath && chmod -R 755 $oraclepath
@@ -720,17 +716,19 @@ case "$action" in
     install_db)
         pre-install
         install_db_soft
-        patch $oraclepath $softdir
+        patch
+        glogin
         install_dbca
         set_param
-        rlwrap $softdir
+        rlwrap
         delete_soft
     ;;
     install_db_soft)
         pre-install
         install_db_soft
-        patch $oraclepath $softdir
-        rlwrap $softdir
+        patch
+        glogin
+        rlwrap
         delete_soft
     ;;
     *)
