@@ -3,8 +3,27 @@
 #   System Required:  Redhat 6,7                                  #
 #   Description: One click Install Oracle DB 11g|18c              #
 #   Author: Xiong Bin                                             #
-#   If any question contact email: xbdba@qq.com                   #
+#   If any question contact email:xbdba@qq.com                    #
+#                                                                 #
+#   Main change                                                   #
+# 1.0  Initial version                                            #
+# 1.1  Use DBCA                                                   #
+# 1.2  Adapt 18c,Linux 7                                          #
+# 1.3  Add DG install                                             #
 #=================================================================#
+
+script_version=v1.3
+
+check_version()
+{
+    check_ip
+    latest_version=$(wget $url/soft/auto-install.sh -q -O  -|grep ^script_version|cut -f 2 -d '=')
+    if [[ $latest_version != $script_version ]];then
+        echo -e "${red}The script is not up to date, please download the latest version!${plain}"
+        echo -e "${yellow}Download Url:${plain}wget $url/soft/auto-install.sh"
+        exit 1
+    fi
+}
 
 ## list rpm to install
 rpm6_11g=(
@@ -121,7 +140,8 @@ realip="127.0.0.1"
 
 softdir="/home/soft"
 
-mkdir -p /home/soft
+mkdir -p $softdir
+
 
 # Make sure only root can run script
 [[ $EUID -ne 0 ]] && echo -e "${red} Error: This script must be run as root! ${plain}" && exit 1
@@ -167,17 +187,22 @@ disable_selinux(){
     fi
 }
 
-# set yum repo
-config_yum()
-{   
-    if check_env ${testip} 0;then
-        url=http://$testip
-    elif check_env ${realip} 0;then
+check_ip()
+{
+    if check_env ${realip} 0;then
         url=http://$realip
+    elif check_env ${testip} 0;then
+        url=http://$testip
     else
         echo "Please check network!"
         exit 1
-    fi
+    fi 
+}
+
+# set yum repo
+config_yum()
+{   
+    check_ip
 
     local version="$(getversion)"
 
@@ -213,6 +238,7 @@ EOF
 
 redhat_code=`cat /etc/yum.repos.d/dvd.repo|grep baseurl|grep redhat|awk -F '=' '{print $2}'|xargs curl -s -o /dev/null -w "%{http_code}"`
 epel_code=`cat /etc/yum.repos.d/dvd.repo|grep baseurl|grep epel|awk -F '=' '{print $2}'|xargs curl -s -o /dev/null -w "%{http_code}"`
+
 if [[ $epel_code == '404' ]]; then
     echo -e "${red}Error: epel yum url network error,Please check file \"/etc/yum.repos.d/dvd.repo\" first!!! ${plain}"
     exit 1 
@@ -330,8 +356,6 @@ init_para()
             pdbsid=pdb1
         fi
     fi
-
-
 }
 
 
@@ -576,6 +600,8 @@ install_dbca()
             -datafileDestination "/u01/app/oracle/oradata/" \
             -emConfiguration none -redoLogFileSize 1024 "
     fi
+    ### config expire time
+    su - oracle -c "source /home/oracle/.bash_profile;echo SQLNET.EXPIRE_TIME=10 >> $ORACLE_HOME/network/admin/sqlnet.ora"
     su - oracle -c "source /home/oracle/.bash_profile;lsnrctl start"
 }
 
@@ -667,7 +693,7 @@ rlwrap()
     echo "======================================="
     echo
     yum install rlwrap -y
-    if [[ `grep "alias sqlplus" $BASH_PROFILE` = "" ]];then
+    sed -i '/alias/d' /home/oracle/.bash_profile
         cat <<EOF >> /home/oracle/.bash_profile
 alias sqlplus='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/sqlplus'
 alias rman='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/rman'
@@ -675,7 +701,6 @@ alias asmcmd='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/a
 alias dgmgrl='rlwrap -D2 -irc -b'\''"@(){}[],+=&^%#;|\'\'' \${ORACLE_HOME}/bin/dgmgrl'
 alias ss='sqlplus / as sysdba'
 EOF
-    fi
 }
 
 delete_soft()
@@ -708,12 +733,317 @@ pre-install()
     echo -e "${green}Oracle install pre-setting finish! ${plain}"
 }
 
+config_ip()
+{
+# primary ip
+echo -e "${yellow}Please input primary database IP : ${plain}"
+read -p "" source_ip
+if check_env ${source_id} 0;then
+    echo -e "${yellow}source ip: $source_ip${plain}"
+else
+    echo -e "${red}Input IP ERROR !${plain}"
+    exit 1
+fi
+
+# physical standby ip
+echo -e "${yellow}Please input physical standby database IP : ${plain}"
+read -p "" target_ip
+if check_env ${target_ip} 0;then
+    echo -e "${yellow}target ip: $target_ip${plain}"
+else
+    echo -e "${red}Input IP ERROR !${plain}"
+    exit 1
+fi
+}
+
+dg_pre()
+{
+config_ip
+# get oracle sid
+orasid=`cat /home/oracle/.bash_profile|grep ORACLE_SID|cut -f 2 -d '='`
+
+# get oracle home path
+path=`cat /home/oracle/.bash_profile |grep dbhome_1|cut -f 2,3,4 -d '/'`
+homepath=/u01/app/oracle/$path
+
+oraclepw=oracle
+}
+
+# set user ORACLE ssh key
+conifg_ssh_key()
+{
+yum install expect -y
+keyfile=/home/oracle/sshkey.sh
+cat <<EOG > $keyfile
+/usr/bin/expect <<EOF
+set timeout 10 
+spawn ssh-keygen -t rsa
+expect {
+        "*file in which to save the key*" {
+            send "\n\r"
+            send_user "/home/oracle/.ssh\r"
+            exp_continue
+        "*Overwrite (y/n)*"{
+            send "n\n\r"
+        }
+        }
+        "*Enter passphrase*" {
+            send "\n\r"
+            exp_continue
+        }
+        "*Enter same passphrase again*" {
+            send "\n\r"
+            exp_continue
+        }
+}
+spawn ssh-copy-id -i /home/oracle/.ssh/id_rsa.pub oracle@$target_ip
+expect {
+            #first connect, no public key in ~/.ssh/known_hosts
+            "Are you sure you want to continue connecting (yes/no)?" {
+            send "yes\r"
+            expect "password:"
+                send "$oraclepw\r"
+            }
+            #already has public key in ~/.ssh/known_hosts
+            "password:" {
+                send "$oraclepw\r"
+            }
+            "Now try logging into the machine" {
+                #it has authorized, do nothing!
+            }
+        }
+expect eof
+EOF
+EOG
+chown oracle:oinstall $keyfile
+chmod 777 $keyfile
+su - oracle -c "sh $keyfile"
+rm -f $keyfile
+}
+
+install_dg()
+{
+# set primary param
+    su - oracle -c "source /home/oracle/.bash_profile;sqlplus / as sysdba <<EOF
+alter database force logging;
+alter system set log_archive_config = 'DG_CONFIG=($orasid,${orasid}_dg)' scope=spfile;
+alter system set log_archive_dest_1 = 'LOCATION=/u01/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=$orasid' scope=spfile;
+alter system set log_archive_dest_2 = 'SERVICE=${orasid}_dg ASYNC
+  VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE)
+  DB_UNIQUE_NAME=${orasid}_dg' scope=spfile;
+alter system set log_archive_dest_state_1 = ENABLE;
+alter system set log_archive_dest_state_2 = ENABLE;
+alter system set fal_server=${orasid}_dg scope=spfile;
+alter system set fal_client=$orasid scope=spfile;
+alter system set standby_file_management=AUTO scope=spfile;
+alter system set dg_broker_start=true;
+alter database add  standby logfile group 4 '/u01/app/oracle/oradata/${orasid}/redo04.log' size 1g;
+alter database add  standby logfile group 5 '/u01/app/oracle/oradata/${orasid}/redo05.log' size 1g;
+alter database add  standby logfile group 6 '/u01/app/oracle/oradata/${orasid}/redo06.log' size 1g;
+alter database add  standby logfile group 7 '/u01/app/oracle/oradata/${orasid}/redo07.log' size 1g;
+exit;
+EOF"
+
+cat <<EOF > $homepath/network/admin/listener.ora
+SID_LIST_LISTENER =
+  (SID_LIST =
+    (SID_DESC =
+      (SID_NAME = $orasid)
+      (GLOBAL_DBNAME=${orasid})
+      (ORACLE_HOME = $homepath)
+    )
+    (SID_DESC =
+      (SID_NAME = $orasid)
+      (GLOBAL_DBNAME=${orasid}_DGMGRL)
+      (ORACLE_HOME = $homepath)
+    )
+  )
+LISTENER =
+  (DESCRIPTION_LIST =
+    (DESCRIPTION =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = $source_ip)(PORT = 1521))
+      (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+    )
+  )
+ADR_BASE_LISTENER = /u01/app/oracle
+EOF
+
+# restart listener
+su - oracle -c "source /home/oracle/.bash_profile;lsnrctl stop"
+su - oracle -c "source /home/oracle/.bash_profile;lsnrctl start"
+
+cat <<EOF > $homepath/network/admin/tnsnames.ora
+$orasid =
+  (DESCRIPTION =
+    (ADDRESS_LIST =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = $source_ip)(PORT = 1521))
+    )
+    (CONNECT_DATA =
+      (SERVICE_NAME = $orasid)
+    )
+  )
+
+${orasid}_dg =
+  (DESCRIPTION =
+    (ADDRESS_LIST =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = $target_ip)(PORT = 1521))
+    )
+    (CONNECT_DATA =
+      (SERVICE_NAME = $orasid)
+    )
+  )
+EOF
+
+mkdir -p /u01/arch
+chown -R oracle:oinstall /u01/arch
+sed -i '/del_arch.sh/d' /var/spool/cron/oracle
+echo "0  18  *  *  * /home/oracle/del_arch.sh >/dev/null" >> /var/spool/cron/oracle
+cat <<EOFP > /home/oracle/del_arch.sh
+#!/bin/bash
+source ~/.bash_profile
+rman <<EOF
+connect target /
+run {
+delete noprompt archivelog all ;
+}
+exit;
+EOF
+exit
+EOFP
+chmod a+x /home/oracle/del_arch.sh
+chown oracle:dba /home/oracle/del_arch.sh
+
+su - oracle -c "source /home/oracle/.bash_profile;sqlplus / as sysdba <<EOF
+shutdown immediate;
+startup mount;
+alter database archivelog;
+alter database open;
+alter system set db_flashback_retention_target =2880;
+alter database flashback on;
+exit;
+EOF"
+
+su - oracle -c "source /home/oracle/.bash_profile;sqlplus / as sysdba <<EOF
+create pfile from spfile;
+exit;
+EOF"
+
+cat <<EOFGG > /home/oracle/tgt.sh
+cd /u01/app/oracle
+mkdir -p {/u01/arch,admin/${orasid}/adump,oradata/${orasid},fast_recovery_area/${orasid}}
+source /home/oracle/.bash_profile
+export ORACLE_SID=${orasid}
+sqlplus / as sysdba <<EOF
+create spfile from pfile='$homepath/dbs/init${orasid}.ora';
+startup nomount
+alter system set db_unique_name=${orasid}_dg scope=spfile;
+alter system set log_archive_config='DG_CONFIG=(${orasid},${orasid}_dg)' scope=spfile;
+alter system set log_archive_dest_1 = 'LOCATION=/u01/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME=${orasid}_dg' scope=spfile;
+alter system set log_archive_dest_2 = 'SERVICE=${orasid} ASYNC
+  VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE)
+  DB_UNIQUE_NAME=${orasid}' scope=spfile;
+alter system set fal_server=${orasid} scope=spfile;
+alter system set fal_client=${orasid}_dg scope=spfile;
+alter system set dg_broker_start=true;
+shutdown abort
+startup nomount
+exit;
+EOF
+
+sed -i '/del_arch.sh/d' /var/spool/cron/oracle
+echo "0  18  *  *  * /home/oracle/del_arch.sh >/dev/null" | crontab -
+cat <<EOFP > /home/oracle/del_arch.sh
+#!/bin/sh
+source /home/oracle/.bash_profile
+sqlplus -silent "/ as sysdba">/home/oracle/delete_arch.sh <<EOF
+set heading off;
+set pagesize 0;
+set term off;
+set feedback off;
+select 'rm -f '||name from v\$archived_log  where DELETED='NO' and APPLIED='YES';
+exit;
+EOF
+sh /home/oracle/delete_arch.sh
+rman target / <<EOF
+crosscheck archivelog all;
+delete noprompt expired archivelog all;
+exit;
+EOF
+EOFP
+chmod a+x /home/oracle/del_arch.sh
+chown oracle:dba /home/oracle/del_arch.sh
+lsnrctl stop
+lsnrctl start
+EOFGG
+
+cat <<EOFGG > /home/oracle/tgt2.sh
+source /home/oracle/.bash_profile
+export ORACLE_SID=${orasid}
+sqlplus / as sysdba <<EOF
+alter database open;
+alter database flashback on;
+alter database recover managed standby database using current logfile disconnect from session;
+exit;
+EOF
+EOFGG
+
+su - oracle -c "cd $homepath/dbs;scp -r init${orasid}.ora orapw${orasid} @$target_ip:$homepath/dbs"
+
+su - oracle -c "cd $homepath/network/admin;scp -r listener.ora tnsnames.ora $target_ip:$homepath/network/admin/"
+su - oracle -c "ssh ${target_ip} sed -i \"s/$source_ip/$target_ip/g\" $homepath/network/admin/listener.ora"
+su - oracle -c "ssh ${target_ip} sed -i \"s/${orasid}_DGMGRL/${orasid}_dg_DGMGRL/g\" $homepath/network/admin/listener.ora"
+su - oracle -c "cd /home/oracle/;scp -r tgt.sh tgt2.sh $target_ip:/home/oracle/;ssh $target_ip chmod a+x /home/oracle/tgt*.sh"
+
+su - oracle -c "ssh ${target_ip} /home/oracle/tgt.sh"
+
+su - oracle -c "source /home/oracle/.bash_profile;rman target 'sys/oracle'@${orasid} auxiliary 'sys/oracle'@${orasid}_dg nocatalog <<EOF
+duplicate target database for standby from active database nofilenamecheck dorecover;
+quit;
+EOF"
+
+
+su - oracle -c "ssh ${target_ip} /home/oracle/tgt2.sh"
+
+su - oracle -c "cd $homepath/sqlplus/admin;scp -r glogin.sql $target_ip:$homepath/sqlplus/admin/"
+
+rm -f tgt2.sh  tgt.sh
+
+# Configure dg broker
+su - oracle -c "source /home/oracle/.bash_profile;dgmgrl <<EOF
+connect sys/oracle@${orasid}
+create configuration '${orasid}cfg' as primary database is '${orasid}' connect identifier is '${orasid}';
+add database '${orasid}_dg' as connect identifier is '${orasid}_dg';
+ENABLE configuration;
+enable database '${orasid}';
+enable database '${orasid}_dg';
+edit database '${orasid}' set property LogXptMode='SYNC';
+edit database '${orasid}_dg' set property LogXptMode='SYNC';
+quit;
+EOF"
+}
+
+remove_oracle_files()
+{
+echo -e "${red}Warning: It will make Oracle unusable!${plain}"
+echo -e "${green}Press any key to start...or Press Ctrl+c to cancel${plain}"
+OLDCONFIG=`stty -g`
+stty -icanon -echo min 1 time 0
+dd count=1 2>/dev/null
+stty ${OLDCONFIG}
+   cd /usr/local/bin
+   rm -f coraenv oraenv dbhome
+   cd /etc
+   rm -f oraInst.loc oratab
+   cd /opt 
+   rm -rf ORCLfmap
+}
 
 # Initialization step
 action=$1
 [ -z $1 ] && action=install
 case "$action" in
     install_db)
+        check_version
         pre-install
         install_db_soft
         patch
@@ -724,6 +1054,7 @@ case "$action" in
         delete_soft
     ;;
     install_db_soft)
+        check_version
         pre-install
         install_db_soft
         patch
@@ -731,7 +1062,16 @@ case "$action" in
         rlwrap
         delete_soft
     ;;
+    dg_install)
+        check_version
+        dg_pre
+        conifg_ssh_key
+        install_dg
+    ;;
+    remove_oracle_files)
+        remove_oracle_files
+    ;;
     *)
-        echo -e "${red}Usage: ./`basename $0` [install_db|install_db_soft]${plain}"
+        echo -e "${red}Usage: ./`basename $0` [install_db|install_db_soft|dg_install]${plain}"
     ;;
 esac
